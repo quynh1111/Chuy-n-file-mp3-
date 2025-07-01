@@ -9,6 +9,9 @@ import json
 import socket
 import os
 import struct
+import tkinter as tk
+from tkinter import filedialog, scrolledtext
+import threading
 
 # Hàm gửi dữ liệu với độ dài
 def send_data(sock, data):
@@ -19,194 +22,232 @@ def send_data(sock, data):
         chunk_size = 65536
         for i in range(0, len(data_bytes), chunk_size):
             sock.sendall(data_bytes[i:i + chunk_size])
-        print(f"Gửi dữ liệu thành công ({len(data_bytes)} bytes)")
-        time.sleep(0.1)
+        return f"Gửi dữ liệu thành công ({len(data_bytes)} bytes)"
     except socket.error as e:
-        print(f"Lỗi gửi dữ liệu: {e}")
-        raise
+        return f"Lỗi gửi dữ liệu: {e}"
+    finally:
+        time.sleep(0.1)
 
 # Hàm nhận dữ liệu với độ dài
 def recv_data(sock):
     try:
         length_bytes = sock.recv(4)
         if not length_bytes:
-            print("Không nhận được độ dài dữ liệu")
-            return None
+            return None, "Không nhận được độ dài dữ liệu"
         length = struct.unpack('!I', length_bytes)[0]
         data = b""
         while len(data) < length:
             chunk = sock.recv(min(length - len(data), 65536))
             if not chunk:
-                print("Không nhận được dữ liệu đầy đủ")
-                return None
+                return None, "Không nhận được dữ liệu đầy đủ"
             data += chunk
-        print(f"Nhận dữ liệu thành công ({len(data)} bytes)")
-        return data
+        return data, f"Nhận dữ liệu thành công ({len(data)} bytes)"
     except socket.error as e:
-        print(f"Lỗi nhận dữ liệu: {e}")
-        return None
+        return None, f"Lỗi nhận dữ liệu: {e}"
 
 # Hàm gửi xác nhận
 def send_ack(sock):
-    try:
-        send_data(sock, "ACK")
-        print("Gửi ACK thành công")
-        time.sleep(0.1)
-    except socket.error as e:
-        print(f"Lỗi gửi ACK: {e}")
-        raise
+    msg = send_data(sock, "ACK")
+    return True, msg
 
-# 1. Tạo cặp khóa RSA
-khoa_rsa_nguoi_nhan = RSA.generate(2048)
-khoa_rieng_nguoi_nhan = khoa_rsa_nguoi_nhan
-khoa_cong_khai_nguoi_nhan = khoa_rsa_nguoi_nhan.publickey()
+# Lớp giao diện người nhận
+class ReceiverGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Người Nhận - Truyền File MP3 An Toàn")
+        self.root.geometry("600x400")
+        self.output_dir = ""
+        self.client = None
 
-# 2. Kết nối đến server
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
-host = 'localhost'
-port = 12345
+        # Giao diện
+        self.label = tk.Label(root, text="Nhận File MP3 An Toàn", font=("Arial", 14))
+        self.label.pack(pady=10)
 
-try:
-    client.connect((host, port))
-    client.settimeout(60)
-    print(f"Kết nối đến server {host}:{port}")
+        self.dir_label = tk.Label(root, text="Chưa chọn thư mục lưu", font=("Arial", 10))
+        self.dir_label.pack()
 
-    # 3. Handshake
-    print("Bắt đầu handshake...")
-    response = recv_data(client)
-    if response is None or response.decode() != "Hello!":
-        print("Handshake thất bại!")
-        client.close()
-        exit()
-    send_data(client, "Ready!")
-    print("Handshake thành công: Gửi Ready!")
+        self.select_button = tk.Button(root, text="Chọn Thư Mục Lưu", command=self.select_directory)
+        self.select_button.pack(pady=5)
 
-    # 4. Gửi khóa công khai của người nhận
-    print("Gửi khóa công khai người nhận...")
-    send_data(client, khoa_cong_khai_nguoi_nhan.export_key())
-    print("Đã gửi khóa công khai của người nhận!")
+        self.start_button = tk.Button(root, text="Bắt Đầu Nhận", command=self.start_receiving, state=tk.DISABLED)
+        self.start_button.pack(pady=5)
 
-    # 5. Nhận khóa công khai của người gửi
-    print("Nhận khóa công khai người gửi...")
-    data = recv_data(client)
-    if data is None:
-        print("Không nhận được khóa công khai của người gửi")
-        client.close()
-        exit()
-    try:
-        khoa_cong_khai_nguoi_gui = RSA.import_key(data)
-        send_ack(client)
-        print("Nhận khóa công khai của người gửi thành công!")
-    except ValueError as e:
-        print(f"Lỗi import khóa công khai: {e}")
-        client.close()
-        exit()
+        self.log_text = scrolledtext.ScrolledText(root, height=15, width=70)
+        self.log_text.pack(pady=10)
+        self.log_text.insert(tk.END, "Khởi động chương trình người nhận...\n")
 
-    # 6. Nhận và xác minh metadata
-    print("Nhận metadata...")
-    data = recv_data(client)
-    if data is None:
-        print("Không nhận được metadata")
-        client.close()
-        exit()
-    try:
-        du_lieu_metadata = json.loads(data.decode())
-        send_ack(client)
-        metadata_nhan = du_lieu_metadata["metadata"]
-        chu_ky_metadata_nhan = base64.b64decode(du_lieu_metadata["chu_ky_metadata"])
-        metadata_bytes = json.dumps(metadata_nhan).encode()
-        hash_metadata = SHA512.new(metadata_bytes)
-        pkcs1_15.new(khoa_cong_khai_nguoi_gui).verify(hash_metadata, chu_ky_metadata_nhan)
-        print(f"Xác minh chữ ký metadata thành công! Thời lượng: {metadata_nhan['thoi_luong']} giây")
-    except (json.JSONDecodeError, ValueError) as e:
-        print(f"Lỗi xử lý metadata: {e}")
-        client.close()
-        exit()
+    def log(self, message):
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.root.update()
 
-    # 7. Nhận và giải mã khóa phiên
-    print("Nhận khóa phiên mã hóa...")
-    khoa_phien_ma_hoa_nhan = recv_data(client)
-    if khoa_phien_ma_hoa_nhan is None:
-        print("Không nhận được khóa phiên mã hóa")
-        client.close()
-        exit()
-    send_ack(client)
-    try:
-        khoa_phien_ma_hoa_nhan = base64.b64decode(khoa_phien_ma_hoa_nhan)  # Giải mã Base64
-        print(f"Độ dài khóa phiên mã hóa: {len(khoa_phien_ma_hoa_nhan)} bytes")  # Debug
-        giai_ma_rsa = PKCS1_OAEP.new(khoa_rieng_nguoi_nhan)
-        khoa_phien = giai_ma_rsa.decrypt(khoa_phien_ma_hoa_nhan)
-        print("Giải mã khóa phiên thành công!")
-    except (ValueError, base64.binascii.Error) as e:
-        print(f"Giải mã khóa phiên thất bại: {e}")
-        client.close()
-        exit()
+    def select_directory(self):
+        self.output_dir = filedialog.askdirectory()
+        if self.output_dir:
+            self.dir_label.config(text=f"Thư mục lưu: {self.output_dir}")
+            self.start_button.config(state=tk.NORMAL)
 
-    # 8. Nhận số lượng gói tin
-    print("Nhận số lượng gói tin...")
-    data = recv_data(client)
-    if data is None:
-        print("Không nhận được số lượng gói tin")
-        client.close()
-        exit()
-    try:
-        so_luong_goi = int(data.decode())
-        send_ack(client)
-        print(f"Số lượng gói tin: {so_luong_goi}")
-    except ValueError as e:
-        print(f"Lỗi xử lý số lượng gói tin: {e}")
-        client.close()
-        exit()
+    def start_receiving(self):
+        self.start_button.config(state=tk.DISABLED)
+        threading.Thread(target=self.receive_file, daemon=True).start()
 
-    # 9. Nhận và xử lý các gói tin
-    goi_tin_nhan = []
-    for i in range(so_luong_goi):
-        print(f"Nhận gói tin {i+1}/{so_luong_goi}...")
-        data = recv_data(client)
-        if data is None:
-            print(f"Không nhận được gói tin {i+1}")
-            client.close()
-            exit()
+    def receive_file(self):
         try:
-            goi = json.loads(data.decode())
-            send_ack(client)
-            goi_tin_nhan.append(goi)
-        except json.JSONDecodeError as e:
-            print(f"Lỗi xử lý gói tin {i+1}: {e}")
-            client.close()
-            exit()
+            # 1. Tạo cặp khóa RSA
+            khoa_rsa_nguoi_nhan = RSA.generate(2048)
+            khoa_rieng_nguoi_nhan = khoa_rsa_nguoi_nhan
+            khoa_cong_khai_nguoi_nhan = khoa_rsa_nguoi_nhan.publickey()
+            self.log("Đã tạo cặp khóa RSA")
 
-    file_dau_ra = "Mp3_Mau_reconstructed.mp3"
-    with open(file_dau_ra, "wb") as f:
-        for i, goi in enumerate(goi_tin_nhan, 1):
+            # 2. Kết nối đến server
+            self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1048576)
+            host = 'localhost'
+            port = 12345
+            self.client.connect((host, port))
+            self.client.settimeout(60)
+            self.log(f"Kết nối đến server {host}:{port}")
+
+            # 3. Handshake
+            self.log("Bắt đầu handshake...")
+            data, msg = recv_data(self.client)
+            self.log(msg)
+            if data is None or data.decode() != "Hello!":
+                self.log("Handshake thất bại!")
+                return
+            msg = send_data(self.client, "Ready!")
+            self.log(msg)
+
+            # 4. Gửi khóa công khai
+            self.log("Gửi khóa công khai người nhận...")
+            msg = send_data(self.client, khoa_cong_khai_nguoi_nhan.export_key())
+            self.log(msg)
+
+            # 5. Nhận khóa công khai người gửi
+            self.log("Nhận khóa công khai người gửi...")
+            data, msg = recv_data(self.client)
+            self.log(msg)
+            if data is None:
+                self.log("Không nhận được khóa công khai")
+                return
             try:
-                iv = base64.b64decode(goi["iv"])
-                ban_ma = base64.b64decode(goi["cipher"])
-                hash_doan = goi["hash"]
-                chu_ky_doan = base64.b64decode(goi["sig"])
+                khoa_cong_khai_nguoi_gui = RSA.import_key(data)
+                success, msg = send_ack(self.client)
+                self.log(msg)
+                if not success:
+                    return
+            except ValueError as e:
+                self.log(f"Lỗi import khóa công khai: {e}")
+                return
 
-                hash_obj = SHA512.new(iv + ban_ma)
-                pkcs1_15.new(khoa_cong_khai_nguoi_gui).verify(hash_obj, chu_ky_doan)
-                print(f"Xác minh chữ ký đoạn {i} thành công!")
+            # 6. Nhận và xác minh metadata
+            self.log("Nhận metadata...")
+            data, msg = recv_data(self.client)
+            self.log(msg)
+            if data is None:
+                self.log("Không nhận được metadata")
+                return
+            try:
+                du_lieu_metadata = json.loads(data.decode())
+                success, msg = send_ack(self.client)
+                self.log(msg)
+                metadata_nhan = du_lieu_metadata["metadata"]
+                chu_ky_metadata_nhan = base64.b64decode(du_lieu_metadata["chu_ky_metadata"])
+                hash_metadata = SHA512.new(json.dumps(metadata_nhan).encode())
+                pkcs1_15.new(khoa_cong_khai_nguoi_gui).verify(hash_metadata, chu_ky_metadata_nhan)
+                self.log(f"Xác minh chữ ký metadata thành công! Thời lượng: {metadata_nhan['thoi_luong']:.2f} giây")
+            except (json.JSONDecodeError, ValueError) as e:
+                self.log(f"Lỗi xử lý metadata: {e}")
+                return
 
-                if hash_obj.hexdigest() != hash_doan:
-                    print(f"Kiểm tra hash đoạn {i} thất bại!")
-                    client.close()
-                    exit()
-                print(f"Kiểm tra hash đoạn {i} thành công!")
+            # 7. Nhận và giải mã khóa phiên
+            self.log("Nhận khóa phiên mã hóa...")
+            data, msg = recv_data(self.client)
+            self.log(msg)
+            if data is None:
+                self.log("Không nhận được khóa phiên")
+                return
+            success, msg = send_ack(self.client)
+            self.log(msg)
+            try:
+                khoa_phien_ma_hoa_nhan = base64.b64decode(data)
+                self.log(f"Độ dài khóa phiên mã hóa: {len(khoa_phien_ma_hoa_nhan)} bytes")
+                giai_ma_rsa = PKCS1_OAEP.new(khoa_rieng_nguoi_nhan)
+                khoa_phien = giai_ma_rsa.decrypt(khoa_phien_ma_hoa_nhan)
+                self.log("Giải mã khóa phiên thành công!")
+            except (ValueError, base64.binascii.Error) as e:
+                self.log(f"Giải mã khóa phiên thất bại: {e}")
+                return
 
-                giai_ma_3des = DES3.new(khoa_phien, DES3.MODE_CBC, iv)
-                doan = giai_ma_3des.decrypt(ban_ma).rstrip(b"\x00")
-                f.write(doan)
-            except (ValueError, KeyError) as e:
-                print(f"Lỗi xử lý đoạn {i}: {e}")
-                client.close()
-                exit()
+            # 8. Nhận số lượng gói tin
+            self.log("Nhận số lượng gói tin...")
+            data, msg = recv_data(self.client)
+            self.log(msg)
+            if data is None:
+                self.log("Không nhận được số lượng gói tin")
+                return
+            try:
+                so_luong_goi = int(data.decode())
+                success, msg = send_ack(self.client)
+                self.log(msg)
+                self.log(f"Số lượng gói tin: {so_luong_goi}")
+            except ValueError as e:
+                self.log(f"Lỗi xử lý số lượng gói tin: {e}")
+                return
 
-    print(f"Tái tạo file thành công: {file_dau_ra}")
+            # 9. Nhận và xử lý gói tin
+            goi_tin_nhan = []
+            for i in range(so_luong_goi):
+                self.log(f"Nhận gói tin {i+1}/{so_luong_goi}...")
+                data, msg = recv_data(self.client)
+                self.log(msg)
+                if data is None:
+                    self.log(f"Không nhận được gói tin {i+1}")
+                    return
+                try:
+                    goi = json.loads(data.decode())
+                    success, msg = send_ack(self.client)
+                    self.log(msg)
+                    goi_tin_nhan.append(goi)
+                except json.JSONDecodeError as e:
+                    self.log(f"Lỗi xử lý gói tin {i+1}: {e}")
+                    return
 
-except Exception as e:
-    print(f"Lỗi người nhận: {e}")
-finally:
-    client.close()
+            file_dau_ra = os.path.join(self.output_dir, "Mp3_Mau_reconstructed.mp3")
+            with open(file_dau_ra, "wb") as f:
+                for i, goi in enumerate(goi_tin_nhan, 1):
+                    try:
+                        iv = base64.b64decode(goi["iv"])
+                        ban_ma = base64.b64decode(goi["cipher"])
+                        hash_doan = goi["hash"]
+                        chu_ky_doan = base64.b64decode(goi["sig"])
+
+                        hash_obj = SHA512.new(iv + ban_ma)
+                        pkcs1_15.new(khoa_cong_khai_nguoi_gui).verify(hash_obj, chu_ky_doan)
+                        self.log(f"Xác minh chữ ký đoạn {i} thành công!")
+
+                        if hash_obj.hexdigest() != hash_doan:
+                            self.log(f"Kiểm tra hash đoạn {i} thất bại!")
+                            return
+
+                        giai_ma_3des = DES3.new(khoa_phien, DES3.MODE_CBC, iv)
+                        doan = giai_ma_3des.decrypt(ban_ma).rstrip(b"\x00")
+                        f.write(doan)
+                        self.log(f"Giải mã đoạn {i} thành công!")
+                    except (ValueError, KeyError) as e:
+                        self.log(f"Lỗi xử lý đoạn {i}: {e}")
+                        return
+
+            self.log(f"Tái tạo file thành công: {file_dau_ra}")
+
+        except Exception as e:
+            self.log(f"Lỗi người nhận: {e}")
+        finally:
+            if self.client:
+                self.client.close()
+            self.start_button.config(state=tk.NORMAL)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ReceiverGUI(root)
+    root.mainloop()
